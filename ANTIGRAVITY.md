@@ -39,9 +39,9 @@ end
   ```
 
 ### 2. In-Place vs Out-of-Place Vector Space Math
-When overloading `VectorInterface.jl` methods (like `scale!`, `add!`):
-- In-place mutation of the underlying values (e.g. `scale!(va, α)`) **only works for mutable types** (like `Matrix` or `TensorMap`).
-- For immutable value types (like `Float64`), in-place mutation throws an `ArgumentError`. In those cases, use out-of-place scaling or reassigning `scale!!`.
+When overloading `VectorInterface.jl` methods:
+- **Mutable vs Immutable**: In-place mutation of the underlying values (e.g. `scale!(va, α)`) **only works for mutable types** (like `Matrix` or `TensorMap`). For immutable value types (like `Float64`), use out-of-place `scale` or reassigning `scale!!`.
+- **3-Argument Scale (`scale!(y, x, α)`)**: Pre-allocated scaling (like those called in Krylov subspace solvers in `KrylovKit.jl`) must **never mutate the source tensor `x`**. Thus, the 3-argument overloads `scale!(y, x, α)` and `scale!!(y, x, α)` must use the out-of-place `VectorInterface.scale(vx, α)` for their elements rather than `scale!(vx, α)` / `scale!!(vx, α)` to keep `x` completely untouched.
 
 ### 3. Type-Stable Matrix Multiplication via `Base.promote_op`
 To correctly support **inhomogeneous tensors** (where different fragments inside the dictionary have varying leg counts or space dimensions), we determine the value type of the result dictionary dynamically using `Base.promote_op`:

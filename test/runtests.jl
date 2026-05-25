@@ -222,6 +222,21 @@ end
         scale!!(FT1_copy, 2.0)
         @test FT1_copy[(sid"A", sid"B")] == fill(10.0, 1, 1)
         
+        # 3-argument scale, scale!, scale!!
+        FT_scaled_3 = scale(FT2, FT1, 5.0)
+        @test FT_scaled_3[(sid"A", sid"B")] == fill(5.0, 1, 1)
+        @test !haskey(FT_scaled_3, (sid"E", sid"F"))
+        
+        FT_copy_3 = deepcopy(FT2)
+        scale!(FT_copy_3, FT1, 5.0)
+        @test FT_copy_3[(sid"A", sid"B")] == fill(5.0, 1, 1)
+        @test !haskey(FT_copy_3, (sid"E", sid"F"))
+        
+        FT_copy_3_b = deepcopy(FT2)
+        scale!!(FT_copy_3_b, FT1, 2.0)
+        @test FT_copy_3_b[(sid"A", sid"B")] == fill(2.0, 1, 1)
+        @test !haskey(FT_copy_3_b, (sid"E", sid"F"))
+        
         # add
         FT_add = add(FT1, FT2, 2.0, 3.0)
         @test FT_add[(sid"A", sid"B")] == fill(3.0, 1, 1)

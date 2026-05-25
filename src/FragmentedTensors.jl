@@ -235,6 +235,23 @@ function VectorInterface.scale!!(ft::FragmentedTensor, α::Number)
     return ft
 end
 
+VectorInterface.scale(y::FragmentedTensor, x::FragmentedTensor, α::Number) = VectorInterface.scale(x, α)
+function VectorInterface.scale!(y::FragmentedTensor, x::FragmentedTensor, α::Number)
+    empty!(y.data)
+    for (k, vx) in pairs(x.data)
+        insert!(y.data, k, VectorInterface.scale(vx, α))
+    end
+    return y
+end
+function VectorInterface.scale!!(y::FragmentedTensor, x::FragmentedTensor, α::Number)
+    empty!(y.data)
+    for (k, vx) in pairs(x.data)
+        insert!(y.data, k, VectorInterface.scale(vx, α))
+    end
+    return y
+end
+
+
 function VectorInterface.add(y::FragmentedTensor{N_out, N_in, TY}, x::FragmentedTensor{N_out, N_in, TX}, α::Number=1, β::Number=1) where {N_out, N_in, TY, TX}
     T_res = promote_type(TY, TX)
     res = Dictionary{Tuple{SpaceID{N_out}, SpaceID{N_in}}, T_res}()
