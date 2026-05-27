@@ -341,15 +341,23 @@ end
         # ---- helpers ----
 
         function get_product_space(sid::SpaceID, space_dict)
-            isempty(sid.labels) && return ProductSpace{spacetype(typeof(first(values(space_dict)))), 0}()
-            spaces = [sid.adjoint[i] ? space_dict[sid.labels[i]]' : space_dict[sid.labels[i]] for i in 1:length(sid.labels)]
+            S_type = spacetype(typeof(first(values(space_dict))))
+            # A label absent from `space_dict` is a *non-materialising* leg (e.g.
+            # the "r" label in the real-world fragmented example): it contributes
+            # no tensor leg, so fragments sharing one SpaceID{N} can have tensor
+            # rank < N. Existing scenarios list every label, so nothing is dropped.
+            spaces = [sid.adjoint[i] ? space_dict[sid.labels[i]]' : space_dict[sid.labels[i]]
+                      for i in 1:length(sid.labels) if haskey(space_dict, sid.labels[i])]
+            isempty(spaces) && return ProductSpace{S_type, 0}()
             return ⊗(spaces...)
         end
 
         function build_random_A(keys_list, space_dict; is_hermitian=false, T=ComplexF64)
-            V_first_out = get_product_space(first(keys_list)[1], space_dict)
-            V_first_in  = get_product_space(first(keys_list)[2], space_dict)
-            T_type = typeof(randn(T, V_first_out ← V_first_in))
+            S_type = spacetype(typeof(first(values(space_dict))))
+            # Rank-agnostic value type: fragments may have different tensor ranks
+            # (see `get_product_space` — non-materialising labels), so the dict
+            # must not pin N₁/N₂ to the first key's rank.
+            T_type = TensorMap{T, S_type, N₁, N₂, Vector{T}} where {N₁, N₂}
             data = Dictionary{Tuple{typeof(first(keys_list)[1]), typeof(first(keys_list)[2])}, T_type}()
             for (S_out, S_in) in keys_list
                 haskey(data, (S_out, S_in)) && continue
@@ -715,11 +723,39 @@ end
             end
         end
 
+        # Group F: fragmented *varying-rank* fragments. A SpaceID{5} whose "r"
+        # legs do not materialise (absent from `space_dict`), so fragments under
+        # one N=5 key type carry tensor ranks 5 / 3 / 1. This mirrors the
+        # real-world failing example (`FragTens/failing_example.data`) at reduced
+        # dims (its Z2(8,8) → Z2(3,3); nv legs minimal). Guards every rank-pinning
+        # site: assemble/disassemble (forward) AND the `dot` pullback (AD).
+        # Both hermitian (eigh path) and non-hermitian (eig/svd path) are covered.
+        # Fewer reps: the rank-5 global block makes the AD heavier than the
+        # ℂ-space scenarios, and the structure — not the RNG — is what matters.
+        let
+            sd = Dict("nv" => Z2Space(0 => 1, 1 => 1), "nh" => Z2Space(0 => 3, 1 => 3))
+            adj = (true, false, false, false, true)
+            S_full = SpaceID{5}(("nv", "nv", "nh", "nv", "nv"), adj)  # rank 5
+            S_lo   = SpaceID{5}(("nv", "nv", "nh", "r",  "r"),  adj)  # rank 3
+            S_ro   = SpaceID{5}(("r",  "r",  "nh", "nv", "nv"), adj)  # rank 3
+            S_min  = SpaceID{5}(("r",  "r",  "nh", "r",  "r"),  adj)  # rank 1
+            sp = [S_full, S_lo, S_ro, S_min]
+            dense = [(Si, Sj) for Si in sp for Sj in sp]
+            push!(SCENARIOS, (
+                name = "fragmented varying-rank N=5 dense herm",
+                space_dict = sd, keys = dense, is_hermitian = true, reps = 6,
+            ))
+            push!(SCENARIOS, (
+                name = "fragmented varying-rank N=5 dense non-herm",
+                space_dict = sd, keys = dense, is_hermitian = false, reps = 6,
+            ))
+        end
+
         # ---- run all scenarios ----
 
-        @testset "[$(lpad(i, 2))] $(scn.name) ($N_REPS reps)" for (i, scn) in enumerate(SCENARIOS)
+        @testset "[$(lpad(i, 2))] $(scn.name)" for (i, scn) in enumerate(SCENARIOS)
             Random.seed!(0xC0DE_FACE + i * 0x9E37_79B9)
-            run_fuzz(scn, N_REPS)
+            run_fuzz(scn, hasproperty(scn, :reps) ? scn.reps : N_REPS)
         end
 
         # ---- edge case: empty FragmentedTensor ----
@@ -858,5 +894,62 @@ end
         
         U_4b, S_4b, V_4b = svd_full(A_ml4b; eigen_space_name="svd_4b")
         @test norm(U_4b * S_4b * V_4b - A_ml4b) < 1e-12
+
+        # 8. Fragmented VARYING-RANK fragments. A SpaceID{5} whose "r" legs do
+        #    not materialise as tensor legs, so fragments sharing one N=5 key
+        #    type carry tensor ranks 5 / 3 / 1. This is the structure of the
+        #    real-world failing example (`failing_example.data`) at reduced dims
+        #    (its Z2(8,8) → Z2(3,3)). It used to crash every decomposition with a
+        #    `convert` MethodError because the assemble/disassemble containers
+        #    pinned the ProductSpace / TensorMap rank to N. Explicit reconstruction
+        #    guard (no AD) for both hermitian and non-hermitian tensors.
+        let
+            sdv = Dict("nv" => Z2Space(0 => 1, 1 => 1), "nh" => Z2Space(0 => 3, 1 => 3))
+            S_type = typeof(sdv["nh"])
+            getps(sid) = ⊗([sid.adjoint[i] ? sdv[sid.labels[i]]' : sdv[sid.labels[i]]
+                            for i in 1:length(sid.labels) if haskey(sdv, sid.labels[i])]...)
+            adjp = (true, false, false, false, true)
+            S_full = SpaceID{5}(("nv", "nv", "nh", "nv", "nv"), adjp)
+            S_lo   = SpaceID{5}(("nv", "nv", "nh", "r",  "r"),  adjp)
+            S_ro   = SpaceID{5}(("r",  "r",  "nh", "nv", "nv"), adjp)
+            S_min  = SpaceID{5}(("r",  "r",  "nh", "r",  "r"),  adjp)
+            fsp = [S_full, S_lo, S_ro, S_min]
+            Tval = TensorMap{ComplexF64, S_type, Na, Nb, Vector{ComplexF64}} where {Na, Nb}
+
+            # The defining feature: same SpaceID{5} N, but tensor ranks differ.
+            @test length(getps(S_full)) == 5
+            @test length(getps(S_lo)) == 3
+            @test length(getps(S_min)) == 1
+
+            # Hermitian fragmented tensor → eigh.
+            dh = Dictionary{Tuple{SpaceID{5}, SpaceID{5}}, Tval}()
+            for So in fsp, Si in fsp
+                haskey(dh, (So, Si)) && continue
+                Wo, Wi = getps(So), getps(Si)
+                if So == Si
+                    t = randn(ComplexF64, Wo ← Wi)
+                    set!(dh, (So, Si), t + t')
+                else
+                    t = randn(ComplexF64, Wo ← Wi)
+                    set!(dh, (So, Si), t)
+                    set!(dh, (Si, So), copy(t'))
+                end
+            end
+            A_fragh = FragmentedTensor{5, 5, Tval}(dh)
+            Dh, Uh = eigh_full(A_fragh; eigen_space_name="frag_eigh")
+            @test norm(Uh * Dh * Uh' - A_fragh) < 1e-10
+
+            # Non-hermitian fragmented tensor → eig + svd.
+            dn = Dictionary{Tuple{SpaceID{5}, SpaceID{5}}, Tval}()
+            for So in fsp, Si in fsp
+                set!(dn, (So, Si), randn(ComplexF64, getps(So) ← getps(Si)))
+            end
+            A_fragn = FragmentedTensor{5, 5, Tval}(dn)
+            Dg, Ug = eig_full(A_fragn; eigen_space_name="frag_eig")
+            @test norm(A_fragn * Ug - Ug * Dg) < 1e-10
+            @test norm(Ug * Dg * inv(Ug) - A_fragn) < 1e-10
+            Usf, Ssf, Vsf = svd_full(A_fragn; eigen_space_name="frag_svd")
+            @test norm(Usf * Ssf * Vsf - A_fragn) < 1e-10
+        end
     end
 end

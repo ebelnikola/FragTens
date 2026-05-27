@@ -54,8 +54,18 @@ end
   abstract supertype (`Any`, `AbstractTensorMap`). This is the price for
   supporting **inhomogeneous storage** — fragments at different keys may
   carry different leg counts or space dimensions.
+- **A fragment's tensor rank can be *less than* `N`.** A `SpaceID{N}` may
+  carry labels that don't materialise as tensor legs (e.g. an `"r"`
+  placeholder leg). So two keys sharing the same `N_out`/`N_in` can map to
+  `TensorMap`s of *different* rank (5, 3, 1, …). `failing_example.data` (a
+  self-adjoint `FragmentedTensor{5,5}`) is the canonical case. **Consequence:**
+  any container keyed inside the factorizations must leave the tensor /
+  `ProductSpace` rank free — never pin it to `N`. See *Rank-agnostic
+  container types* below.
 - **N-leg verification.** Inner constructor checks every key's two
-  `SpaceID`s match `N_out` and `N_in` respectively.
+  `SpaceID`s match `N_out` and `N_in` respectively (it checks the *key*
+  arity, not the stored tensor's rank — those may legitimately differ, per
+  the previous bullet).
 
 ## Critical implementation rules
 
@@ -195,6 +205,29 @@ Using `space_dict_in[S]'` (the dual) would shift `U_g`'s codomain into
 the dual space and break the downstream `A * U_g` reconstruction with
 a `SpaceMismatch`. Don't re-introduce the prime.
 
+### Rank-agnostic container types
+
+Because a `SpaceID{N}` may have legs that don't materialise (see the data-model
+note), fragments sharing one `N` can have tensor rank `< N`. **Every dict /
+`TensorMap` value type built inside the assemble/disassemble machinery must
+leave the materialised rank free**, otherwise the first non-full-rank fragment
+throws a `convert` `MethodError`:
+
+```julia
+CodomType = ProductSpace{S_type}                              # NOT {S_type, N_out}
+T_val     = TensorMap{T, S_type, N₁, N₂, Vector{T}} where {N₁, N₂}  # U: {…,N₁,1,…}; V: {…,1,N₂,…}
+space_dict = Dict{SpaceID{N_out}, ProductSpace{S_type}}()     # in assemble_U_frag
+```
+
+This rule covers `assemble_global`, `disassemble_global`,
+`disassemble_global_U/_V`, and `assemble_U_frag` (the last feeds `inv`, hence
+`eig_full` reconstruction). The **AD path has the same trap once more**: the
+`dot` rrule must type its cotangent `FragmentedTensor` from the mapped dict's
+own `eltype(...)` — *never* `typeof(first(da_data))`, which pins the first
+fragment's concrete rank and forces the inner-constructor `convert` to throw.
+General lesson: don't derive a result `FragmentedTensor`'s `TensorType` from one
+fragment; use the dict `eltype`, `Base.promote_op`, or a free `where` UnionAll.
+
 ### Non-differentiable structural helpers
 
 `extract_out_in_spaces`, `extract_out_in`, `make_S_eigen`,
@@ -249,6 +282,20 @@ Excuse policies fire only on genuine numerical degeneracy:
 - `eig_full` / `eig_trunc`: `cond(U) > 1e6` (the only places `inv(U)` is used).
 - `eigh_trunc` / `svd_trunc`: truncation-boundary gap
   `min |kept| − atol < 1e-6`.
+
+**Varying-rank fragments are covered in two places** (regression guard for the
+rank-pinning bugs above):
+- *Fuzz* "Group F" — two scenarios (`dense herm`, `dense non-herm`) over a
+  `SpaceID{5}` whose `"r"` legs don't materialise (rank 5/3/1 fragments),
+  mirroring `failing_example.data` at reduced dims. These also exercise the
+  **AD** path, which is what catches the `dot`-pullback variant. The fuzz
+  helper convention: **a label absent from a scenario's `space_dict` is a
+  non-materialising leg** (`get_product_space` skips it); `build_random_A`
+  therefore uses a rank-free `where {N₁,N₂}` dict value type. Heavy scenarios
+  can set a per-scenario `reps` field to override `N_REPS`.
+- *Explicit* "Multi-Space" testset §8 — a fast, no-AD reconstruction guard for
+  the same structure (hermitian `eigh_full`; non-hermitian `eig_full`/`inv`/
+  `svd_full`).
 
 ## Consumer interface (web GUI)
 

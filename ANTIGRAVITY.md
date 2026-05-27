@@ -133,3 +133,25 @@ Anything else is a real failure.
 The losses are gauge-invariant by design (each is a reconstruction of `A`
 through the decomposition, dotted with a fixed random `M`), so sort-order
 fragility — the dominant cause of historical false failures — cannot occur.
+
+**Varying-rank coverage**: "Group F" adds a `SpaceID{5}` whose `"r"` legs don't
+materialise (rank 5/3/1 fragments), hermitian and non-hermitian, mirroring
+`failing_example.data` at reduced dims. Convention: a label absent from a
+scenario's `space_dict` is a non-materialising leg. There's also an explicit
+no-AD reconstruction guard in the "Multi-Space" testset (§8).
+
+### 10. Rank-agnostic container types in the factorizations
+A `SpaceID{N}` can have legs that don't materialise as tensor legs, so fragments
+sharing one `N` may have tensor rank `< N`. **Never pin the materialised rank**
+when building the assemble/disassemble containers:
+```julia
+ProductSpace{S_type}                              # NOT ProductSpace{S_type, N_out}
+TensorMap{T, S_type, N₁, N₂, Vector{T}} where {N₁, N₂}   # NOT {…, N_out, N_in, …}
+```
+Pinning to `N` throws a `convert` `MethodError` on the first non-full-rank
+fragment. This bit `assemble_global`, `disassemble_global`,
+`disassemble_global_U/_V`, `assemble_U_frag`, **and** the `dot` rrule — the
+last typed its cotangent from `typeof(first(da_data))` (the first fragment's
+concrete rank); use the dict's own `eltype(...)` instead. Rule of thumb: derive
+a result `FragmentedTensor`'s `TensorType` from the dict `eltype`,
+`Base.promote_op`, or a free `where` UnionAll — never from a single fragment.

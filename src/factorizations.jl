@@ -41,8 +41,13 @@ function assemble_global(A::FragmentedTensor{N_out, N_in, TensorType}, OUT, IN) 
             ComplexF64
         end
     end
-    CodomType = ProductSpace{S_type, N_out}
-    DomType = ProductSpace{S_type, N_in}
+    # NB: the ProductSpace rank is intentionally left free (not pinned to
+    # N_out / N_in). A fragmented SpaceID{N} may carry labels that don't
+    # materialise as tensor legs (e.g. trivial "r" legs), so different keys
+    # sharing the same N can map to ProductSpaces of *different* rank. Pinning
+    # the rank to N_out / N_in throws a convert error on such tensors.
+    CodomType = ProductSpace{S_type}
+    DomType = ProductSpace{S_type}
 
     # 0. Extract spaces from the blocks
     space_dict_out = Dict{SpaceID{N_out}, CodomType}()
@@ -166,7 +171,9 @@ function disassemble_global(H_global, OUT::AbstractVector{SpaceID{N_out}}, IN::A
     T_res = eltype(H_global)
     S_type = spacetype(typeof(V_global_out))
 
-    T_val = TensorMap{T_res, S_type, N_out, N_in, Vector{T_res}}
+    # Leave the materialised-leg ranks free: a fragmented SpaceID{N} may carry
+    # non-materialising labels, so the actual TensorMap rank can be < N_out / N_in.
+    T_val = TensorMap{T_res, S_type, N₁, N₂, Vector{T_res}} where {N₁, N₂}
     res_data = Dictionary{Tuple{SpaceID{N_out}, SpaceID{N_in}}, T_val}()
 
     for S_out in OUT
@@ -206,9 +213,10 @@ function disassemble_global_U(U_global, OUT, V_virt, offsets_out, eigen_space_na
     N_out = length(first(OUT).labels)
     S_eigen = SpaceID{1}((string(eigen_space_name),), (false,))
 
-    W_1 = space_dict[first(OUT)]
-    U_1 = zeros(T_res, W_1 ← V_virt)
-    T_val = typeof(U_1)
+    S_type = spacetype(typeof(V_virt))
+    # Codomain rank is free (fragmented SpaceIDs may have non-materialising legs);
+    # domain is always the 1-leg eigen/SV space.
+    T_val = TensorMap{T_res, S_type, N₁, 1, Vector{T_res}} where {N₁}
 
     U_data = Dictionary{Tuple{SpaceID{N_out}, SpaceID{1}}, T_val}()
 
@@ -269,9 +277,10 @@ function disassemble_global_V(V_global, IN, V_virt, offsets_in, eigen_space_name
     N_in = length(first(IN).labels)
     S_eigen = SpaceID{1}((string(eigen_space_name),), (false,))
 
-    W_1 = space_dict[first(IN)]
-    V_1 = zeros(T_res, V_virt ← W_1)
-    T_val = typeof(V_1)
+    S_type = spacetype(typeof(V_virt))
+    # Domain rank is free (fragmented SpaceIDs may have non-materialising legs);
+    # codomain is always the 1-leg eigen/SV space.
+    T_val = TensorMap{T_res, S_type, 1, N₂, Vector{T_res}} where {N₂}
 
     V_data = Dictionary{Tuple{SpaceID{1}, SpaceID{N_in}}, T_val}()
 
@@ -347,8 +356,9 @@ function assemble_U_frag(U_frag::FragmentedTensor{N_out, 1, T}) where {N_out, T}
     end
     V_virt = domain(first_val)[1]
 
-    # Collect codomain spaces per S_k from the data.
-    space_dict = Dict{SpaceID{N_out}, ProductSpace{S_type, N_out}}()
+    # Collect codomain spaces per S_k from the data. Rank left free: a fragmented
+    # SpaceID{N_out} may carry non-materialising legs, so codomain rank can be < N_out.
+    space_dict = Dict{SpaceID{N_out}, ProductSpace{S_type}}()
     for (k, val) in pairs(U_frag.data)
         S_k, _ = k
         if !haskey(space_dict, S_k)
@@ -689,8 +699,12 @@ function ChainRulesCore.rrule(::typeof(LinearAlgebra.dot), a::FragmentedTensor{N
         #   da = conj(dval) * b  ;  db = dval * a
         da_data = map(x -> conj(dval) * x, b.data)
         db_data = map(x -> dval * x, a.data)
-        da = FragmentedTensor{N_out, N_in, typeof(first(da_data))}(da_data)
-        db = FragmentedTensor{N_out, N_in, typeof(first(db_data))}(db_data)
+        # Use the mapped dict's own (rank-agnostic) value type, not the concrete
+        # rank of its first fragment: fragmented tensors store varying-rank
+        # tensors under one key type, so `typeof(first(...))` would force a
+        # convert that throws on any fragment of a different rank.
+        da = FragmentedTensor{N_out, N_in, eltype(da_data)}(da_data)
+        db = FragmentedTensor{N_out, N_in, eltype(db_data)}(db_data)
         return (NoTangent(), da, db)
     end
     return val, dot_pullback
