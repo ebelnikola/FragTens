@@ -53,15 +53,19 @@ This guarantees:
 - Zero overhead and perfect type-stability for homogeneous storage.
 - Safe type promotion to abstract types (like `Any` or `AbstractTensorMap`) for heterogeneous/inhomogeneous storage, permitting blocks of different sizes and legs to coexist in the result.
 
-### 4. Dictionary `dot` (Inner Product) Correctness
+### 4. Dictionary `dot` (Inner Product) Correctness — sum over intersection
 Generic `dot(d1, d2)` on `Dictionary` in `LinearAlgebra` falls back to iterating over values in insertion order, **ignoring the dictionary keys**.
-- **Rule**: To compute the exact dot product between two fragmented tensors, first verify that their key sets are equal via `issetequal(keys(a.data), keys(b.data))`, and then compute the dot product key-by-key:
+- **Philosophy**: Two `FragmentedTensor`s with the same `(N_out, N_in)` live in the same direct-sum space `⊕_S V_S`; a key that's missing from the dictionary is a *true zero* in that direct sum, not a "shape mismatch". This is the same reason `+` uses `mergewith` (the union of keysets) and `*` (FT × FT) accumulates over matching middle SpaceIDs.
+- **Rule**: Compute `dot` by iterating over the *intersection* of the two keysets — terms outside the intersection have at least one zero factor and contribute zero:
   ```julia
   res = zero(promote_type(scalartype(TA), scalartype(TB)))
   for k in keys(a.data)
-      res += dot(a.data[k], b.data[k])
+      if haskey(b.data, k)
+          res += dot(a.data[k], b.data[k])
+      end
   end
   ```
+- **Anti-pattern**: do *not* `issetequal`-check and either error or return zero on mismatch. That contradicts the direct-sum interpretation and silently kills AD pullbacks where a cotangent legitimately has a larger keyset than the primal (e.g. cotangents from `assemble_global` span `OUT × IN`).
 
 ### 5. Composite Index Lookup (`FT[S]`)
 To look up a composite `SpaceID` key `S` of length `N_out + N_in`:
@@ -69,3 +73,63 @@ To look up a composite `SpaceID` key `S` of length `N_out + N_in`:
 2. Decompose `S` into `S_out` (first `N_out` legs) and `S_in_prime` (remaining `N_in` legs).
 3. Apply `'` to `S_in_prime` to get `S_in`.
 4. Return `FT[(S_out, S_in)]`.
+
+### 6. Self-adjoint space fallback in `assemble_global`
+When `assemble_global(A, OUT, IN)` is called with `OUT = IN = SPACES = union(...)`
+(the eigh / eig path), a `SpaceID` `S` may appear on one side but not the other
+in `A.data`. The missing-side entry inherits the *same* `W` from the present side
+— **not** `W'`:
+```julia
+W_out = haskey(space_dict_out, S) ? space_dict_out[S] : space_dict_in[S]
+W_in  = haskey(space_dict_in,  S) ? space_dict_in[S]  : space_dict_out[S]
+```
+The test convention builds hermitian fragments as `TensorMap(W ← W)` (codom and
+dom are the *same* `W`, not duals). Using `space_dict_in[S]'` would break
+downstream `A * U_g` with a `SpaceMismatch`.
+
+### 7. Decomposition wrappers are plain functions; no custom decomposition rrules
+`eigh_full` / `eig_full` / `svd_full` etc. on `FragmentedTensor` are plain
+Julia functions traced by Zygote. The only ChainRules rrules at this layer
+are at the **assemble/disassemble boundary**:
+- `assemble_global`, `disassemble_global_U`, `disassemble_global_V`
+- `FragmentedTensor{N,M,T}(::Dictionary)` constructor and
+  `wrap_singleton_frag(tensor, S_eigen)` (the singleton-boxing helper)
+- `Base.adjoint`, `Base.:*(::FT, ::FT)`, `Base.inv(::FT{N,1,T})`
+- arithmetic (`+`, `-`, `*` scalar, `dot`)
+
+Pure structural helpers `extract_out_in_spaces`, `extract_out_in`,
+`make_S_eigen`, `combined_codom_dict` are registered
+`@non_differentiable` (they consume `SpaceID`s, which carry no gradient).
+
+The inner `eigh_full(H_global)` call uses MatrixAlgebraKit's own pullback,
+which is gauge-invariant by construction (`inv_safe(d_i - d_j, ε)` zeros out
+the would-be-singular gauge-fragile contributions when eigenvalues are within
+`ε`). For non-degenerate spectra MAKit's AD is correct exactly; for
+degenerate cases its `@warn` flags that the user's cotangent has
+gauge-sensitive components.
+
+### 8. Matrix inverse on eig-shape FragmentedTensor
+`Base.inv(U::FragmentedTensor{N_out, 1, T})` is the inverse of the
+"eigenvector" shape (keys `(S_k, S_eigen)`). Implementation: assemble
+`U_global`, call TensorKit's `inv`, disassemble the result into the
+V-shape (keys `(S_eigen, S_k)`). The rrule uses the matrix-inverse
+adjoint identity `dX = -Y' * dY * Y'`. Required for the gauge-invariant
+`eig` AD loss `real(dot(U * D * inv(U), M))`.
+
+For non-square `U_kept` from `eig_trunc` this generalises to a
+pseudoinverse — *not yet implemented*; `eig_trunc` AD is skipped in the
+current test suite. See `~/.claude/plans/factorizations-test-plan.md`.
+
+### 9. Test suite is fuzz-based
+The factorisation tests are organised as a small structural catalogue of
+scenarios; each scenario runs `N_REPS = 40` random repetitions and reports
+the per-decomposition `pass / excused_ill_cond / excused_near_boundary /
+real_fail` breakdown via `@info`. AD-vs-FD failures are excused only by
+two specific structural conditions:
+- `cond(U) > 1e6` for the `inv(U)`-using losses (`eig_full`, `eig_trunc`);
+- `min |kept eigenvalue| − atol < 1e-6` for truncated decompositions.
+Anything else is a real failure.
+
+The losses are gauge-invariant by design (each is a reconstruction of `A`
+through the decomposition, dotted with a fixed random `M`), so sort-order
+fragility — the dominant cause of historical false failures — cannot occur.

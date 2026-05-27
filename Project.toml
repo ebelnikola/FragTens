@@ -4,17 +4,27 @@ version = "0.1.0"
 authors = ["nikolay"]
 
 [deps]
+ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
 Dictionaries = "85a47980-9c8c-11e8-2b9f-f7ca1fa99fb4"
+FiniteDifferences = "26cc04aa-876d-5657-8c51-4c34ba976000"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+MatrixAlgebraKit = "6c742aac-3347-4629-af66-fc926824e5e4"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 TensorKit = "07d1fe3e-3e46-537d-9eac-e9e13d0d4cec"
 TensorOperations = "6aa20fa7-93e2-5fca-9bc0-fbd0db3c71a2"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 VectorInterface = "409d34a3-91d5-4945-b6ec-7529ddf182d8"
+Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
 
 [compat]
+ChainRulesCore = "1.15"
 Dictionaries = "0.4.6"
+FiniteDifferences = "0.12.34"
 LinearAlgebra = "1.12.0"
+MatrixAlgebraKit = "0.6.7"
+Random = "1.11.0"
 TensorKit = "0.16.5"
 TensorOperations = "5.6.0"
 Test = "1.11.0"
 VectorInterface = "0.5.0"
+Zygote = "0.7.10"

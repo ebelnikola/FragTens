@@ -75,6 +75,38 @@ function FragmentedTensor(dict::Dictionary{SpaceID{N}, TensorType}) where {N, Te
     return FragmentedTensor{N, 0, TensorType}(Dictionary(new_keys, dict))
 end
 
+"""
+    FragmentedTensor((S_out, S_in) => t, ...)
+
+Convenience pair-based constructor. Each argument is a `Pair` whose first
+element is a `(SpaceID{N_out}, SpaceID{N_in})` tuple and whose second element
+is a tensor (or any value to be stored in that slot). All pairs must share
+the same key type; `N_out`, `N_in` and the stored `TensorType` are inferred.
+
+`TensorType` is promoted across all pairs via `promote_type`, so heterogeneous
+tensor types are stored under their common supertype (e.g. `AbstractTensorMap`).
+
+```julia
+A = FragmentedTensor(
+    (sid"a", sid"b") => t1,
+    (sid"b", sid"a") => t2,
+)
+```
+
+A `ChainRulesCore.rrule` is provided in `factorizations.jl`, so the constructor
+participates correctly in Zygote autodiff.
+"""
+function FragmentedTensor(pair1::Pair{<:Tuple{SpaceID{N_out}, SpaceID{N_in}}}, more::Pair{<:Tuple{SpaceID{N_out}, SpaceID{N_in}}}...) where {N_out, N_in}
+    all_pairs = (pair1, more...)
+    T_promoted = promote_type((typeof(p.second) for p in all_pairs)...)
+    K = Tuple{SpaceID{N_out}, SpaceID{N_in}}
+    data = Dictionary{K, T_promoted}()
+    for p in all_pairs
+        insert!(data, p.first, p.second)
+    end
+    return FragmentedTensor{N_out, N_in, T_promoted}(data)
+end
+
 # ---------------------------------------------------------
 # Dictionary Interface
 # ---------------------------------------------------------
@@ -157,21 +189,54 @@ Base.:*(c::Number, a::FragmentedTensor{N_out, N_in, TensorType}) where {N_out, N
 Base.:/(a::FragmentedTensor{N_out, N_in, TensorType}, c::Number) where {N_out, N_in, TensorType} =
     FragmentedTensor(a.data ./ c)
 
+function safe_scalartype(::Type{T}) where T
+    try
+        return VectorInterface.scalartype(T)
+    catch
+        T_concrete = (T isa Union) ? T.a : T
+        try
+            return VectorInterface.scalartype(T_concrete)
+        catch
+            return ComplexF64
+        end
+    end
+end
+
 function LinearAlgebra.dot(a::FragmentedTensor{N_out, N_in, TA}, b::FragmentedTensor{N_out, N_in, TB}) where {N_out, N_in, TA, TB}
-    if !issetequal(keys(a.data), keys(b.data))
-        return zero(promote_type(scalartype(TA), scalartype(TB)))
-    end
-    if isempty(a.data)
-        return zero(promote_type(scalartype(TA), scalartype(TB)))
-    end
-    res = zero(promote_type(scalartype(TA), scalartype(TB)))
+    T_scalar = promote_type(
+        !isempty(a.data) ? VectorInterface.scalartype(first(values(a.data))) : safe_scalartype(TA),
+        !isempty(b.data) ? VectorInterface.scalartype(first(values(b.data))) : safe_scalartype(TB)
+    )
+    # Fragmented tensors with the same leg counts live in a single direct-sum
+    # space ⊕_S V_S; a missing key is a true zero in that direct sum, so it
+    # contributes zero to the inner product. The dot product is therefore the
+    # sum over the *intersection* of the two keysets (terms outside the
+    # intersection have at least one zero factor).
+    res = zero(T_scalar)
     for k in keys(a.data)
-        res += dot(a.data[k], b.data[k])
+        if haskey(b.data, k)
+            res += dot(a.data[k], b.data[k])
+        end
     end
     return res
 end
 
-LinearAlgebra.norm(ft::FragmentedTensor) = norm(ft.data)
+function LinearAlgebra.norm(ft::FragmentedTensor)
+    if isempty(ft.data)
+        return zero(real(VectorInterface.scalartype(typeof(ft))))
+    end
+    return norm(ft.data)
+end
+
+function Base.adjoint(ft::FragmentedTensor{N_out, N_in, TensorType}) where {N_out, N_in, TensorType}
+    T_res = Base.promote_op(adjoint, TensorType)
+    res_data = Dictionary{Tuple{SpaceID{N_in}, SpaceID{N_out}}, T_res}()
+    for (k, val) in pairs(ft.data)
+        S_out, S_in = k
+        insert!(res_data, (S_in, S_out), val')
+    end
+    return FragmentedTensor{N_in, N_out, T_res}(res_data)
+end
 
 function Base.:*(a::FragmentedTensor{N_out1, N_in1, T1}, b::FragmentedTensor{N_out2, N_in2, T2}) where {N_out1, N_in1, T1, N_out2, N_in2, T2}
     if N_in1 != N_out2
@@ -207,8 +272,10 @@ end
 # VectorInterface.jl Overloads
 # ---------------------------------------------------------
 
-VectorInterface.scalartype(::Type{FragmentedTensor{N_out, N_in, TensorType}}) where {N_out, N_in, TensorType} = VectorInterface.scalartype(TensorType)
-VectorInterface.scalartype(a::FragmentedTensor) = VectorInterface.scalartype(typeof(a))
+function VectorInterface.scalartype(::Type{FragmentedTensor{N_out, N_in, TensorType}}) where {N_out, N_in, TensorType}
+    return safe_scalartype(TensorType)
+end
+VectorInterface.scalartype(a::FragmentedTensor) = !isempty(a.data) ? VectorInterface.scalartype(first(values(a.data))) : VectorInterface.scalartype(typeof(a))
 
 function VectorInterface.zerovector(ft::FragmentedTensor{N_out, N_in, TensorType}, ::Type{S}) where {N_out, N_in, TensorType, S<:Number}
     if !isempty(ft.data)
@@ -334,5 +401,7 @@ VectorInterface.inner(a::FragmentedTensor, b::FragmentedTensor) = dot(a, b)
 # function TensorOperations.tensoralloc_contract(...)
 #     ...
 # end
+
+include("factorizations.jl")
 
 end # module
