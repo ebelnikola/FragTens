@@ -141,6 +141,30 @@ Look up a composite `SpaceID` key `S` of length `N_out + N_in`:
 3. Apply adjoint: `S_in = S_in_prime'`.
 4. Return `FT[(S_out, S_in)]`.
 
+### 6. `permute` overload (two index levels)
+
+`TensorKit.permute(FT, ((p1...), (p2...)); non_material_labels=String[])` (and
+the single-tuple form `permute(FT, (p1...))` ≡ `permute(FT, (p1, ()))`) permutes
+a `FragmentedTensor`. `p1` / `p2` are 1-based indices into the **combined** key
+leg list `S_out * S_in'` and become the new out / in legs.
+
+Two distinct levels, both required:
+
+1. **SpaceID level.** Per key, reindex the combined SpaceID: new out =
+   `S_full[p1]`, new in-prime = `S_full[p2]`, then `S_in_new = (S_full[p2])'`.
+   Indexing the SpaceID carries the per-label adjoint flags along.
+2. **TensorKit level.** A stored tensor may have **fewer legs than the key has
+   labels** — labels in `non_material_labels` (infinite / non-materialised) are
+   not real tensor legs. Map combined-key positions to the tensor's own legs in
+   order of the *material* labels (`leg_to_key_leg = findall(∉ non_material)`,
+   inverted to `key_leg_to_leg`), then build `p1_tens` / `p2_tens` by dropping
+   non-material positions, and `permute(tensor, (p1_tens, p2_tens))`.
+
+The two index spaces (key legs vs. tensor legs) must not be conflated — that's
+the whole point of the `non_material_labels` mapping. Empty `FragmentedTensor`
+short-circuits to an empty result of the new `(length(p1), length(p2))` shape.
+Tests: the "Permutation" testset in `test/runtests.jl`.
+
 ## Factorizations (`src/factorizations.jl`)
 
 Provides decompositions over `FragmentedTensor` by assembling fragments

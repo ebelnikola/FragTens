@@ -315,6 +315,112 @@ end
         @test FT_C_su2[(sid"i", sid"k")] ≈ t1_su2 * t2_su2
     end
 
+    @testset "Permutation" begin
+        Va = ℂ^2
+        Vb = ℂ^3
+        Vc = ℂ^4
+
+        # ── No non-material labels; every key label is a real tensor leg. ──
+        # Key (out = a,b ; in = c). Combined key = (a, b, c'), 3 legs.
+        # Tensor: codomain (Va ⊗ Vb), domain Vc -> legs 1,2 = a,b; leg 3 = c.
+        @testset "non_material empty, all material" begin
+            t = randn(ComplexF64, Va ⊗ Vb, Vc)
+            FT = FragmentedTensor(Dictionary([(sid"a, b", sid"c")], [t]))
+
+            # p1 = (1,3) -> out (a, c'); p2 = (2,) -> in_prime (b) -> in (b').
+            FTp = permute(FT, ((1, 3), (2,)))
+            @test FTp isa FragmentedTensor{2, 1}
+            @test haskey(FTp, (sid"a, c'", sid"b'"))
+            @test FTp[(sid"a, c'", sid"b'")] ≈ permute(t, ((1, 3), (2,)))
+
+            # Identity permutation reproduces the original tensor and key.
+            FTid = permute(FT, ((1, 2), (3,)))
+            @test FTid[(sid"a, b", sid"c")] ≈ t
+
+            # Single-tuple form == ((p1), ()): all legs become out, in empty.
+            FTout = permute(FT, (1, 2, 3))
+            @test FTout isa FragmentedTensor{3, 0}
+            @test haskey(FTout, (sid"a, b, c'", sid""))
+            @test FTout[(sid"a, b, c'", sid"")] ≈ permute(t, ((1, 2, 3), ()))
+
+            # Empty out tuple: everything goes to the in-space.
+            FTin = permute(FT, ((), (1, 2, 3)))
+            @test FTin isa FragmentedTensor{0, 3}
+            @test FTin[(sid"", (sid"a, b, c'")')] ≈ permute(t, ((), (1, 2, 3)))
+        end
+
+        # ── Non-material label that *appears* in the key. "r" is not a real
+        # tensor leg, so the stored tensor has fewer legs than the key. ──
+        @testset "non_material present in key" begin
+            # Key (out = r,a ; in = b). Combined = (r, a, b'). Material: a, b.
+            # Tensor: codomain Va, domain Vb (2 legs).
+            t = randn(ComplexF64, Va, Vb)
+            FT = FragmentedTensor(Dictionary([(sid"r, a", sid"b")], [t]))
+
+            # p1 = (2,1) -> out (a, r); p2 = (3,) -> in_prime (b') -> in (b).
+            # Tensor-level: key leg 2 -> tensor leg 1; key leg 3 -> tensor leg 2;
+            # key leg 1 (r) is dropped. So p1_tens=(1,), p2_tens=(2,).
+            FTp = permute(FT, ((2, 1), (3,)); non_material_labels=["r"])
+            @test FTp isa FragmentedTensor{2, 1}
+            @test haskey(FTp, (sid"a, r", sid"b"))
+            @test FTp[(sid"a, r", sid"b")] ≈ permute(t, ((1,), (2,)))
+
+            # Reorder the two material legs onto the same side.
+            # p1 = (3,2) (b, a -> out), p2 = (1,) (r -> in).
+            # p1_tens: key3->leg2, key2->leg1 => (2,1); p2_tens: key1(r) dropped => ().
+            FTq = permute(FT, ((3, 2), (1,)); non_material_labels=["r"])
+            @test FTq[(sid"b', a", (sid"r")')] ≈ permute(t, ((2, 1), ()))
+        end
+
+        # ── Non-material label *not* present in any key: must behave exactly
+        # like calling with no non_material_labels. ──
+        @testset "non_material absent from keys" begin
+            t = randn(ComplexF64, Va ⊗ Vb, Vc)
+            FT = FragmentedTensor(Dictionary([(sid"a, b", sid"c")], [t]))
+            FT_no = permute(FT, ((1, 3), (2,)))
+            FT_z = permute(FT, ((1, 3), (2,)); non_material_labels=["z"])
+            @test keys(FT_z.data) == keys(FT_no.data)
+            @test FT_z[(sid"a, c'", sid"b'")] ≈ FT_no[(sid"a, c'", sid"b'")]
+        end
+
+        # ── Adversarial cases (the "what could break this" pass). ──
+        @testset "adversarial" begin
+            # (1) Non-material label *interleaved between* material legs, plus
+            # multiple non-material labels. Key out = (a, r, b), in = (s, c).
+            # Combined = (a, r, b, s', c'); material = a, b, c (legs 1,2,3).
+            # Tensor: codomain (Va ⊗ Vb), domain Vc.
+            t = randn(ComplexF64, Va ⊗ Vb, Vc)
+            FT = FragmentedTensor(Dictionary([(sid"a, r, b", sid"s, c")], [t]))
+            nm = ["r", "s"]
+
+            # Move c to the front, keep a,b; drop r,s to wherever.
+            # p1 = (5, 1, 3) -> out (c', a, b); p2 = (2, 4) -> in_prime (r, s')
+            #   -> in (r', s).
+            # Tensor mapping: key1->1(a), key3->2(b), key5->3(c); r,s have no leg.
+            # p1_tens: key5->3, key1->1, key3->2 => (3,1,2)
+            # p2_tens: key2(r) drop, key4(s) drop => ()
+            FTp = permute(FT, ((5, 1, 3), (2, 4)); non_material_labels=nm)
+            @test FTp isa FragmentedTensor{3, 2}
+            @test haskey(FTp, (sid"c', a, b", (sid"r, s'")'))
+            @test FTp[(sid"c', a, b", (sid"r, s'")')] ≈ permute(t, ((3, 1, 2), ()))
+
+            # (2) Empty FragmentedTensor permutes to an empty one of the new shape.
+            FT_empty = FragmentedTensor{2, 1, typeof(t)}()
+            FTe = permute(FT_empty, ((1,), (2, 3)))
+            @test FTe isa FragmentedTensor{1, 2}
+            @test isempty(FTe.data)
+
+            # (3) Multiple fragments permuted independently and consistently.
+            t1 = randn(ComplexF64, Va ⊗ Vb, Vc)
+            t2 = randn(ComplexF64, Va ⊗ Vc, Vb)
+            FTm = FragmentedTensor(Dictionary(
+                [(sid"a, b", sid"c"), (sid"a, c", sid"b")], [t1, t2]))
+            FTmp = permute(FTm, ((1, 3), (2,)))
+            @test FTmp[(sid"a, c'", sid"b'")] ≈ permute(t1, ((1, 3), (2,)))
+            @test FTmp[(sid"a, b'", sid"c'")] ≈ permute(t2, ((1, 3), (2,)))
+        end
+    end
+
     @testset "Fragmented Factorizations & AD" begin
         # =====================================================================
         # Test design (plan v3):

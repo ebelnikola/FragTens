@@ -269,6 +269,89 @@ function Base.:*(a::FragmentedTensor{N_out1, N_in1, T1}, b::FragmentedTensor{N_o
 end
 
 # ---------------------------------------------------------
+# Permutation
+# ---------------------------------------------------------
+
+"""
+    permute(FT, ((p1...), (p2...)); non_material_labels=String[])
+    permute(FT, (p1...);            non_material_labels=String[])
+
+Permute the legs of a `FragmentedTensor`, overloading `TensorKit.permute`.
+
+`p1` / `p2` are 1-based indices into the *combined* key leg list
+`S_out * S_in'` and become the new out / in legs respectively. The single-tuple
+form is equivalent to `permute(FT, (p1, ()); …)` — i.e. an empty new in-space.
+Empty tuples are allowed for either side.
+
+The permutation acts on two levels:
+
+1. **SpaceID level.** For each key `(S_out, S_in)`, the combined SpaceID
+   `S_full = S_out * S_in'` is reindexed: the new out-space is `S_full[p1]`,
+   the new (primed) in-space is `S_full[p2]`, then `S_in_new = (S_full[p2])'`.
+2. **TensorKit level.** A stored tensor may carry *fewer* legs than the key has
+   labels (labels in `non_material_labels` — e.g. infinite / non-materialised
+   labels — do not correspond to real tensor legs). The combined-key positions
+   are mapped to the tensor's own legs (in order of appearance among the
+   material labels), and the tensor is permuted by the induced permutation.
+"""
+function _permute_frag(ft::FragmentedTensor{N_out, N_in, TT}, p1::Tuple, p2::Tuple;
+                       non_material_labels=String[]) where {N_out, N_in, TT}
+    new_N_out = length(p1)
+    new_N_in = length(p2)
+    nonmat = Set(String.(non_material_labels))
+
+    if isempty(ft.data)
+        return FragmentedTensor{new_N_out, new_N_in, TT}()
+    end
+
+    out_pairs = Pair[]
+    for ((S_out, S_in), tensor) in pairs(ft.data)
+        # Combined key SpaceID = S_out * S_in'. Indexing it preserves the
+        # per-label adjoint flags.
+        S_full = S_out * S_in'
+        labels_full = collect(S_full.labels)
+        adjoint_full = collect(S_full.adjoint)
+
+        # --- SpaceID-level permutation ---
+        idx1 = collect(Int, p1)
+        idx2 = collect(Int, p2)
+        S_out_new = SpaceID{new_N_out}(
+            NTuple{new_N_out,String}(labels_full[idx1]),
+            NTuple{new_N_out,Bool}(adjoint_full[idx1]),
+        )
+        S_in_new_prime = SpaceID{new_N_in}(
+            NTuple{new_N_in,String}(labels_full[idx2]),
+            NTuple{new_N_in,Bool}(adjoint_full[idx2]),
+        )
+        S_in_new = S_in_new_prime'
+
+        # --- TensorKit-level permutation ---
+        # Map combined-key legs (1..N) to the tensor's own legs (1..rank).
+        # Only material labels correspond to tensor legs, in order.
+        list_of_labels = labels_full # labels carry no primes (those live in adjoint)
+        leg_to_key_leg = findall(x -> !(x in nonmat), list_of_labels)
+        key_leg_to_leg = Dict(key_leg => leg for (leg, key_leg) in enumerate(leg_to_key_leg))
+
+        p1_tens = Tuple(key_leg_to_leg[kl] for kl in p1 if haskey(key_leg_to_leg, kl))
+        p2_tens = Tuple(key_leg_to_leg[kl] for kl in p2 if haskey(key_leg_to_leg, kl))
+
+        tensor_permuted = permute(tensor, (p1_tens, p2_tens))
+
+        push!(out_pairs, (S_out_new, S_in_new) => tensor_permuted)
+    end
+
+    return FragmentedTensor(out_pairs...)
+end
+
+# Two-tuple form: permute(FT, ((p1...), (p2...)); …)
+TensorKit.permute(ft::FragmentedTensor, perm::Tuple{Tuple, Tuple}; non_material_labels=String[]) =
+    _permute_frag(ft, perm[1], perm[2]; non_material_labels=non_material_labels)
+
+# Single-tuple form: permute(FT, (p1...); …) ≡ permute(FT, (p1, ()); …)
+TensorKit.permute(ft::FragmentedTensor, perm::Tuple{Vararg{Int}}; non_material_labels=String[]) =
+    _permute_frag(ft, perm, (); non_material_labels=non_material_labels)
+
+# ---------------------------------------------------------
 # VectorInterface.jl Overloads
 # ---------------------------------------------------------
 
