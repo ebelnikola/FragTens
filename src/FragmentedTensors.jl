@@ -367,6 +367,15 @@ end
 VectorInterface.scalartype(a::FragmentedTensor) = !isempty(a.data) ? VectorInterface.scalartype(first(values(a.data))) : VectorInterface.scalartype(typeof(a))
 
 function VectorInterface.zerovector(ft::FragmentedTensor{N_out, N_in, TensorType}, ::Type{S}) where {N_out, N_in, TensorType, S<:Number}
+    # Preserve `TensorType` when the requested scalar type already matches the
+    # source. Probing `typeof(zerovector(first(ft.data), S))` would otherwise
+    # collapse a rank-agnostic UnionAll (e.g. `Tensor{T,Sp,N₁,V} where N₁`) to
+    # the concrete rank of whichever tensor `first(ft.data)` happens to return,
+    # which then makes downstream `scale!!`/`add!!` (which `empty!` and refill
+    # the data dict) reject fragments of any other rank.
+    if S === safe_scalartype(TensorType)
+        return FragmentedTensor{N_out, N_in, TensorType}()
+    end
     if !isempty(ft.data)
         zero_type = typeof(VectorInterface.zerovector(first(ft.data), S))
         return FragmentedTensor{N_out, N_in, zero_type}()
