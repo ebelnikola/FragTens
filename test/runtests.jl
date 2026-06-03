@@ -8,6 +8,7 @@ using ChainRulesCore
 using Zygote
 using FiniteDifferences
 using Random
+using KrylovKit
 using FragmentedTensors
 using FragmentedTensors: SpaceID, FragmentedTensor, NullSpaceID, assemble_global, disassemble_global, disassemble_global_U, disassemble_global_V
 
@@ -266,6 +267,159 @@ end
         FT_dot1 = FragmentedTensor(Dictionary([(sid"A", sid"B")], [fill(2.0, 1, 1)]))
         FT_dot2 = FragmentedTensor(Dictionary([(sid"A", sid"B")], [fill(3.0, 1, 1)]))
         @test inner(FT_dot1, FT_dot2) == 6.0
+    end
+
+    # Mimics the apply_TM / full-linear.jl call pattern: a FragmentedTensor with
+    # a rank-agnostic TensorType (Tensor{T,Sp,N₁,V} where N₁ — different keys
+    # carry different-rank tensors) fed to KrylovKit's eigsolve. Three landmines
+    # this guards against (each one bit us during the full-linear.jl bring-up):
+    #   1. broadcast on `.data` (`scale`/`*`/`/`) returning a Dictionary that
+    #      *shares* the source's `Indices` object (Dictionaries.jl `similar`
+    #      aliasing). A downstream `insert!` via the result silently extends
+    #      the source's keyset → UndefRefError when iterating the source.
+    #   2. `zerovector(ft)` probing `first(ft.data)` and collapsing the empty
+    #      container's TensorType to the concrete rank of one stored tensor;
+    #      KrylovKit then routes that narrowed FT through 3-arg `scale!!`,
+    #      which rejects fragments of any other rank.
+    #   3. `zerovector(ft, S)` with `S ≠ scalartype(ft)` (KrylovKit's
+    #      real→complex lift inside Arnoldi for asymmetric operators) doing
+    #      the same rank collapse via the same probe.
+    #
+    # The unit-level checks (scale-aliasing, zerovector TT preservation) are
+    # parameterised over multiple space families because full-linear.jl runs
+    # on Z2Space — not ℂ^n — and graded-space conversions hit different code
+    # paths in TensorKit. The end-to-end KrylovKit run stays on Z2Space, the
+    # closest analogue of the production setup.
+    @testset "Rank-Agnostic FragmentedTensor — KrylovKit eigsolve" begin
+        Random.seed!(0xF8AD)
+
+        # Per-space unit checks: TensorKit's conversion / similar / zerovector
+        # plumbing differs between ComplexSpace and the GradedSpace family, so
+        # we run the same three checks on a representative of each.
+        spaces = [
+            ("ComplexSpace",  ℂ^2),
+            ("Z2Space",       Z2Space(0 => 2, 1 => 2)),
+            ("U1Space",       U1Space(0 => 1, 1 => 1)),
+            ("SU2Space",      SU2Space(0 => 2, 1/2 => 1)),
+        ]
+
+        for (name, V) in spaces
+            @testset "$name" begin
+                # Three keys with three different tensor ranks → `valtype(src.data)`
+                # is forced into the `Tensor{...,N₁,...} where N₁` UnionAll.
+                t_a = randn(Float64, V)
+                t_b = randn(Float64, V)
+                t_c = randn(Float64, V ⊗ V)
+                src = FragmentedTensor(dictionary([
+                    (sid"a", NullSpaceID) => t_a,
+                    (sid"b", NullSpaceID) => t_b,
+                    (sid"c", NullSpaceID) => t_c,
+                ]))
+                # The dictionary inferred a rank-agnostic value type.
+                @test valtype(src.data) isa UnionAll
+                @test scalartype(src) === Float64
+
+                @testset "scale does not alias source Indices" begin
+                    scaled = scale(src, 0.0)
+                    # Mutating the scaled FT must not bleed into the source.
+                    insert!(scaled.data, (sid"d", NullSpaceID), randn(Float64, V))
+                    @test !haskey(src.data, (sid"d", NullSpaceID))
+                    @test length(keys(src.data)) == 3
+                    # Source iteration still works after the foreign insert.
+                    for k in keys(src.data)
+                        @test src.data[k] isa AbstractTensorMap
+                    end
+                end
+
+                @testset "zerovector preserves UnionAll TT (same scalar)" begin
+                    z = zerovector(src)
+                    @test typeof(z) === typeof(src)
+                    # The empty container accepts fragments of multiple ranks.
+                    insert!(z.data, (sid"a", NullSpaceID), randn(Float64, V))      # rank 1
+                    insert!(z.data, (sid"c", NullSpaceID), randn(Float64, V ⊗ V))  # rank 2
+                    @test length(keys(z.data)) == 2
+                end
+
+                @testset "zerovector preserves UnionAll TT (cross-scalar)" begin
+                    z_c = zerovector(src, ComplexF64)
+                    @test scalartype(z_c) === ComplexF64
+                    # Result TT is still rank-agnostic — just with ComplexF64
+                    # substituted for the scalar. We don't pin to `===`
+                    # because the abstract-interpretation `where` TypeVar may
+                    # be named differently (`_A` vs `N₁`), but it must accept
+                    # tensors of multiple ranks at the new scalar.
+                    insert!(z_c.data, (sid"a", NullSpaceID), randn(ComplexF64, V))      # rank 1
+                    insert!(z_c.data, (sid"c", NullSpaceID), randn(ComplexF64, V ⊗ V))  # rank 2
+                    @test length(keys(z_c.data)) == 2
+                end
+            end
+        end
+
+        # End-to-end integration on Z2Space (the full-linear.jl analogue): a
+        # small operator that mixes the rank-1 fragments at keys `a`/`b` like
+        # a rotation (giving a complex eigenvalue pair 2±i, forcing the
+        # real→complex Arnoldi lift) and scales the rank-2 fragment at key
+        # `c` independently (keeping the rank-agnostic UnionAll TT alive
+        # through every internal op). The operator's output omits no keys
+        # that are present in the input vector itself, but the dropped-key
+        # asymmetry is still exercised by the `c`-decoupled block via
+        # `add!!(scale(Ax₀, 0), x₀)` because the orthonormal basis builds
+        # mixed-key superpositions internally.
+        @testset "KrylovKit eigsolve on Z2Space" begin
+            V = Z2Space(0 => 2, 1 => 2)
+            t_a = randn(Float64, V)
+            t_b = randn(Float64, V)
+            t_c = randn(Float64, V ⊗ V)
+            src = FragmentedTensor(dictionary([
+                (sid"a", NullSpaceID) => t_a,
+                (sid"b", NullSpaceID) => t_b,
+                (sid"c", NullSpaceID) => t_c,
+            ]))
+
+            function apply_op(v::FragmentedTensor)
+                result_dict = typeof(v.data)()
+                if haskey(v, sid"a") && haskey(v, sid"b")
+                    out_a =  2.0 * v[sid"a"] + 1.0 * v[sid"b"]
+                    out_b = -1.0 * v[sid"a"] + 2.0 * v[sid"b"]
+                    insert!(result_dict, (sid"a", NullSpaceID), out_a)
+                    insert!(result_dict, (sid"b", NullSpaceID), out_b)
+                end
+                if haskey(v, sid"c")
+                    insert!(result_dict, (sid"c", NullSpaceID), 1.5 * v[sid"c"])
+                end
+                return FragmentedTensor(result_dict)
+            end
+
+            # Sanity: applying the operator preserves type and all keys.
+            Av = apply_op(src)
+            @test typeof(Av) === typeof(src)
+            @test haskey(Av, sid"a") && haskey(Av, sid"b") && haskey(Av, sid"c")
+
+            # The (a,b) block has eigenvalues 2±i (magnitude √5 ≈ 2.236), the
+            # c block has 1.5. So |λ_max| = √5; complex pair forces the
+            # cross-scalar lift inside KrylovKit's _schursolve.
+            howmany = 2
+            eigvals, eigvecs, info = eigsolve(apply_op, src, howmany, :LM; tol=1e-10)
+            @test info.converged ≥ 1
+            @test abs(abs(eigvals[1]) - sqrt(5)) < 1e-6
+
+            # The leading eigenvector lives in the (a,b) subspace; the
+            # c-component decays since |1.5| < √5.
+            vec1 = eigvecs[1]
+            @test haskey(vec1, sid"a") || haskey(vec1, sid"b")
+            ab_mass = (haskey(vec1, sid"a") ? norm(vec1[sid"a"]) : 0.0) +
+                      (haskey(vec1, sid"b") ? norm(vec1[sid"b"]) : 0.0)
+            c_mass  = haskey(vec1, sid"c") ? norm(vec1[sid"c"]) : 0.0
+            @test ab_mass > 10 * c_mass
+
+            # And `apply_op(v₁) ≈ λ₁ v₁` on the rank-1 (a,b) subspace.
+            Av1 = apply_op(vec1)
+            for k in (sid"a", sid"b")
+                if haskey(vec1, k)
+                    @test norm(Av1[k] - eigvals[1] * vec1[k]) < 1e-6
+                end
+            end
+        end
     end
 
     @testset "Diverse Spaces (TensorKit)" begin

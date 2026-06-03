@@ -224,7 +224,7 @@ weakdeps = ["StaticArrays"]
     ForwardDiffStaticArraysExt = "StaticArrays"
 
 [[deps.FragmentedTensors]]
-deps = ["ChainRulesCore", "Dictionaries", "FiniteDifferences", "LinearAlgebra", "Random", "TensorKit", "TensorOperations", "Test", "VectorInterface", "Zygote"]
+deps = ["ChainRulesCore", "Dictionaries", "FiniteDifferences", "LinearAlgebra", "MatrixAlgebraKit", "Random", "TensorKit", "TensorOperations", "Test", "VectorInterface", "Zygote"]
 path = "."
 uuid = "e87f3b60-c5d3-4634-b0cf-555e09f4b7a1"
 version = "0.1.0"

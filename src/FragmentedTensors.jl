@@ -376,6 +376,17 @@ function VectorInterface.zerovector(ft::FragmentedTensor{N_out, N_in, TensorType
     if S === safe_scalartype(TensorType)
         return FragmentedTensor{N_out, N_in, TensorType}()
     end
+    # Cross-scalar-type case (e.g. real `b[1]` lifted to ComplexF64 by KrylovKit
+    # for a non-symmetric eigenproblem): derive the new value type *abstractly*
+    # from the source `TensorType` so any `where N₁` rank-agnosticism is
+    # preserved with the scalar swapped in. Falling back to probing a sample
+    # would re-introduce the rank-collapse bug for cross-scalar paths.
+    new_TT = Core.Compiler.return_type(VectorInterface.zerovector, Tuple{TensorType, Type{S}})
+    if new_TT !== Any && new_TT !== Union{}
+        return FragmentedTensor{N_out, N_in, new_TT}()
+    end
+    # Final fallback: only use the runtime probe when the compiler couldn't
+    # infer the return type at all (concrete-tensor FT, or non-TensorKit `T`).
     if !isempty(ft.data)
         zero_type = typeof(VectorInterface.zerovector(first(ft.data), S))
         return FragmentedTensor{N_out, N_in, zero_type}()
