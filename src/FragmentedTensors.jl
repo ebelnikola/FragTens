@@ -180,14 +180,20 @@ Base.:+(a::FragmentedTensor{N_out, N_in, TA}, b::FragmentedTensor{N_out, N_in, T
 Base.:-(a::FragmentedTensor{N_out, N_in, TA}, b::FragmentedTensor{N_out, N_in, TB}) where {N_out, N_in, TA, TB} =
     FragmentedTensor(mergewith(+, a.data, map(-, b.data)))
 
+# NOTE on `copy(...)` wrappers: `Dictionary` broadcasting (.+ / .* / ./) goes
+# through `Base.similar(::AbstractDictionary, T)` which *shares* the source's
+# `Indices` object. Downstream `insert!`s into the result would silently extend
+# the shared keyset, leaving the source's values vector shorter than its index
+# count and triggering `UndefRefError` on the next `keys(...)` iteration. The
+# explicit `copy` materialises an independent `Indices`.
 Base.:*(a::FragmentedTensor{N_out, N_in, TensorType}, c::Number) where {N_out, N_in, TensorType} =
-    FragmentedTensor(a.data .* c)
+    FragmentedTensor(copy(a.data .* c))
 
 Base.:*(c::Number, a::FragmentedTensor{N_out, N_in, TensorType}) where {N_out, N_in, TensorType} =
-    FragmentedTensor(c .* a.data)
+    FragmentedTensor(copy(c .* a.data))
 
 Base.:/(a::FragmentedTensor{N_out, N_in, TensorType}, c::Number) where {N_out, N_in, TensorType} =
-    FragmentedTensor(a.data ./ c)
+    FragmentedTensor(copy(a.data ./ c))
 
 function safe_scalartype(::Type{T}) where T
     try
@@ -371,7 +377,7 @@ end
 VectorInterface.zerovector!(ft::FragmentedTensor) = (empty!(ft.data); ft)
 VectorInterface.zerovector!!(ft::FragmentedTensor) = VectorInterface.zerovector!(ft)
 
-VectorInterface.scale(ft::FragmentedTensor, α::Number) = FragmentedTensor(ft.data .* α)
+VectorInterface.scale(ft::FragmentedTensor, α::Number) = FragmentedTensor(copy(ft.data .* α))
 function VectorInterface.scale!(ft::FragmentedTensor, α::Number)
     for k in keys(ft.data)
         VectorInterface.scale!(ft.data[k], α)
